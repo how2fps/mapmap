@@ -6,6 +6,8 @@
 #include <QCommandLineParser>
 #include <QCommandLineOption>
 #include <QOpenGLContext>
+#include <QSettings>
+#include <QTimer>
 
 #include "MM.h"
 #include "MainWindow.h"
@@ -217,7 +219,10 @@ int main(int argc, char *argv[])
   // finally, load the project file.
   if (projectFileValue != "")
   {
-    win->loadFile(projectFileValue);
+    if (projectFileValue == qEnvironmentVariable("READING_POD_MAPMAP_PROJECT"))
+      win->loadReadingPodStory();
+    else
+      win->loadFile(projectFileValue);
   }
 
   QString oscPortValue = parser.value("osc-port");
@@ -240,18 +245,14 @@ int main(int argc, char *argv[])
   else
     qFatal("Invalid option <frame-rate>.");
 
-  // Terminate splash.
-  splash.showMessage("  " + QObject::tr("Done."),
-                     Qt::AlignLeft | Qt::AlignTop, MM::WHITE);
-  splash.finish(win);
-  splash.raise();
-
-  // Launch program.
+  splash.close();
   win->show();
 
-  if (parser.isSet(fullscreenOption))
+  const bool restoreFullscreen = QSettings().value("displayOutputWindow", MM::DISPLAY_OUTPUT_WINDOW).toBool();
+  if (parser.isSet(fullscreenOption) || restoreFullscreen)
   {
-    win->startFullScreen();
+    // Let the editor initialize its OpenGL widget before opening the shared output.
+    QTimer::singleShot(350, win, &MainWindow::startFullScreen);
   }
 
   // Start app.

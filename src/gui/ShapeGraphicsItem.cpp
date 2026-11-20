@@ -262,7 +262,27 @@ void TextureGraphicsItem::_prePaint(QPainter* painter,
 	Q_CHECK_PTR(texture);
 
   Q_UNUSED(option);
+  const QTransform transform = painter->deviceTransform();
   painter->beginNativePainting();
+
+  // Qt's painter uses shaders and does not set the fixed-function matrices.
+  // Match its item-to-device transform so the texture follows the editor controls.
+  GLint viewport[4];
+  glGetIntegerv(GL_VIEWPORT, viewport);
+  const GLdouble modelView[16] = {
+    transform.m11(), transform.m12(), 0, 0,
+    transform.m21(), transform.m22(), 0, 0,
+    0, 0, 1, 0,
+    transform.dx(), transform.dy(), 0, 1
+  };
+  glPushAttrib(GL_TRANSFORM_BIT);
+  glMatrixMode(GL_PROJECTION);
+  glPushMatrix();
+  glLoadIdentity();
+  glOrtho(0, viewport[2], viewport[3], 0, -1, 1);
+  glMatrixMode(GL_MODELVIEW);
+  glPushMatrix();
+  glLoadMatrixd(modelView);
 
   // Free any textures orphaned by destroyed sources now that a GL context is
   // current (see issue #229).
@@ -304,6 +324,7 @@ void TextureGraphicsItem::_prePaint(QPainter* painter,
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
+
   // Set texture color (apply opacity).
   glColor4f(1.0f, 1.0f, 1.0f,
             isOutput() ? getLayer()->getComputedOpacity() : getLayer()->getSource()->getOpacity());
@@ -317,6 +338,11 @@ void TextureGraphicsItem::_postPaint(QPainter* painter,
 
   glDisable(GL_TEXTURE_2D);
 
+  glMatrixMode(GL_MODELVIEW);
+  glPopMatrix();
+  glMatrixMode(GL_PROJECTION);
+  glPopMatrix();
+  glPopAttrib();
   painter->endNativePainting();
 }
 

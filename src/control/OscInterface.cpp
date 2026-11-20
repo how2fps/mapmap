@@ -26,7 +26,10 @@
 #include "MainWindow.h"
 #include <QVariant>
 #include <QColor>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QPointF>
+#include <QSaveFile>
 
 namespace mmp {
 
@@ -197,8 +200,60 @@ void OscInterface::applyOscCommand(MainWindow &main_window, QVariantList & comma
   const QString path = command.at(0).toString();
   const QVariantList args = command.mid(2);
 
+  if (path == "/mapmap/reading-pod/load")
+  {
+    if (args.size() == 1 && args.first().typeId() == QMetaType::QString
+        && !args.first().toString().isEmpty())
+      main_window.loadReadingPodStory(args.first().toString());
+    return;
+  }
+
+  if (path == "/mapmap/reading-pod/layout")
+  {
+    if (args.size() == 1 && args.first().typeId() == QMetaType::QString)
+      main_window.applyReadingPodLayout(args.first().toString());
+    return;
+  }
+
+  const bool prepareVideo = path == "/mapmap/reading-pod/prepare";
+  if (prepareVideo || path == "/mapmap/reading-pod/release")
+  {
+    if (!main_window.isReadingPodProject() || args.size() != (prepareVideo ? 2 : 1)
+        || args.first().typeId() != QMetaType::Int || args.first().toInt() <= 0)
+      return;
+    const int id = args.first().toInt();
+    auto video = qSharedPointerDynamicCast<Video>(findSourceById(main_window.getMappingManager(), id));
+    if (video.isNull() || !video->isReadingPodDeferred())
+      return;
+    if (!prepareVideo)
+    {
+      video->pause();
+      video->releaseResources();
+      return;
+    }
+    const QString ticket = args.at(1).toString();
+    if (args.at(1).typeId() != QMetaType::QString || ticket.size() != 32)
+      return;
+    const QString status = qEnvironmentVariable("READING_POD_MAPMAP_PROJECT") + ".video-" + QString::number(id);
+    video->prepareReadingPodFrame([status, ticket](bool ready) {
+      QSaveFile reply(status);
+      if (reply.open(QIODevice::WriteOnly))
+      {
+        reply.write(QJsonDocument(QJsonObject{{"ticket", ticket}, {"ready", ready}}).toJson(QJsonDocument::Compact));
+        reply.commit();
+      }
+    });
+    return;
+  }
+
   OscAction action = parseOscAction(path, args);
+  const bool podPreview = main_window.isReadingPodProject() && !main_window.isWindowModified()
+      && (action.type == OscAction::LayerVertex
+          || (action.type == OscAction::SourceProperty
+              && (action.property == "opacity" || action.property == "volume")));
   bool handled = applyAction(main_window, action);
+  if (handled && podPreview)
+    main_window.setWindowModified(false);
 
   if (!handled && is_verbose())
   {

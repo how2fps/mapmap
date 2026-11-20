@@ -21,6 +21,7 @@
 #include <QAudioOutput>
 #include <QVideoSink>
 #include <QVideoFrame>
+#include <functional>
 
 namespace mmp {
 
@@ -38,6 +39,7 @@ public:
   ~VideoPlayerImpl() override;
 
   bool loadMovie(const QString& path) override;
+  void prepareFirstFrame(const QString& path, std::function<void(bool)> ready);
   bool isLive() override { return false; }
 
   bool setPlayState(bool play) override;
@@ -56,6 +58,9 @@ private slots:
   void onMediaStatusChanged(QMediaPlayer::MediaStatus status);
 
 private:
+  bool openMovie(const QString& path, std::function<void(bool)> firstFrame);
+  std::function<void(bool)> _firstFrame;
+  bool _podFrameReady = false;
   QMediaPlayer *_player;
   QAudioOutput *_audioOutput;
   QVideoSink   *_videoSink;

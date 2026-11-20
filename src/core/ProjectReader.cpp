@@ -93,7 +93,7 @@ void ProjectReader::parseProject(const QJsonObject& project)
       if (source->getSourceType() == Source::SourceType::Video)
       {
         QSharedPointer<Video> media = qSharedPointerCast<Video>(source);
-        if (!media.isNull() && !_window->fileExists(media->getUri()))
+        if (!media.isNull() && !media->isReadingPodDeferred() && !_window->fileExists(media->getUri()))
           media->setUri(_window->locateMediaFile(media->getUri(), false));
       }
       if (source->getSourceType() == Source::SourceType::Image)
@@ -150,6 +150,11 @@ Source::ptr ProjectReader::parseSource(const QJsonObject& obj)
     }
 
     qDebug() << "Created new instance with id: " << source->getId();
+    if (obj.value("readingPodDeferred").toBool() && qEnvironmentVariableIsSet("READING_POD_MAPMAP_PROJECT"))
+    {
+      if (auto *video = qobject_cast<Video*>(source.data()))
+        video->deferReadingPodVideo();
+    }
     source->read(obj);
     return source;
   }

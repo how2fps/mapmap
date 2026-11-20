@@ -369,6 +369,10 @@ public:
   /// Re-opens the capture device / player released by releaseResources().
   virtual void reacquireResources();
 
+  void deferReadingPodVideo() { _readingPodDeferred = true; }
+  bool isReadingPodDeferred() const { return _readingPodDeferred; }
+  void prepareReadingPodFrame(std::function<void(bool)> ready);
+
   /// Locks mutex (default = no effect).
   virtual void lockMutex();
 
@@ -424,6 +428,7 @@ protected:
   // the caller has already confirmed a fresh frame is available (see
   // _pollForBits()).
   bool _generateThumbnail();
+  bool _readingPodDeferred = false;
 
   // Polls (via the Qt event loop, never blocking) until _impl has a fresh
   // frame, then calls onReady. Gives up silently after attemptsLeft tries.

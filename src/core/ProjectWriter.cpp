@@ -52,6 +52,18 @@ bool ProjectWriter::writeFile(QIODevice *device)
   }
   project[ProjectLabels::LAYERS] = layers;
 
+  if (_window->isReadingPodProject())
+  {
+    QFile previous(qEnvironmentVariable("READING_POD_MAPMAP_PROJECT"));
+    if (previous.open(QIODevice::ReadOnly))
+    {
+      const QJsonObject metadata = QJsonDocument::fromJson(previous.readAll()).object();
+      for (const QString &key : {QString("readingPodStory"), QString("readingPodRevision"), QString("readingPodLayoutRevision")})
+        if (metadata.contains(key))
+          project.insert(key, metadata.value(key));
+    }
+  }
+
   QJsonDocument doc(project);
   device->write(doc.toJson(QJsonDocument::Indented));
 

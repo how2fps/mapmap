@@ -30,6 +30,8 @@ VideoPlayerImpl::~VideoPlayerImpl()
 
 void VideoPlayerImpl::freeResources()
 {
+  _firstFrame = {};
+  _podFrameReady = false;
   if (_player) {
     _player->stop();
     delete _player;
@@ -45,11 +47,27 @@ void VideoPlayerImpl::freeResources()
 
 bool VideoPlayerImpl::loadMovie(const QString& path)
 {
+  return openMovie(path, {});
+}
+
+void VideoPlayerImpl::prepareFirstFrame(const QString& path, std::function<void(bool)> ready)
+{
+  if (_podFrameReady)
+    ready(true);
+  else if (_firstFrame)
+    _firstFrame = std::move(ready);
+  else
+    openMovie(path, std::move(ready));
+}
+
+bool VideoPlayerImpl::openMovie(const QString& path, std::function<void(bool)> firstFrame)
+{
   // Store URI in base class.
   VideoImpl::loadMovie(path);
 
   // Tear down any previous player and reset frame state.
   freeResources();
+  _firstFrame = std::move(firstFrame);
 
   _player      = new QMediaPlayer(this);
   _audioOutput = new QAudioOutput(this);
@@ -65,7 +83,7 @@ bool VideoPlayerImpl::loadMovie(const QString& path)
 
   _player->setSource(QUrl::fromLocalFile(path));
 
-  if (_playInLoop)
+  if (_playInLoop && !_firstFrame)
     _player->setLoops(QMediaPlayer::Infinite);
 
   // Seek is always enabled for file sources in Qt 6.
@@ -74,7 +92,7 @@ bool VideoPlayerImpl::loadMovie(const QString& path)
   _audioIsConnected = true;
 
   _player->setPlaybackRate(_rate);
-  _audioOutput->setVolume(_volume);
+  _audioOutput->setVolume(_firstFrame ? 0.0 : _volume);
   _player->play();
   _playState = true;
 
@@ -99,6 +117,14 @@ void VideoPlayerImpl::onVideoFrameChanged(const QVideoFrame& frame)
   }
 
   unlockMutex();
+
+  if (_firstFrame && !img.isNull())
+  {
+    _podFrameReady = true;
+    auto ready = std::move(_firstFrame);
+    setPlayState(false);
+    ready(true);
+  }
 }
 
 void VideoPlayerImpl::onMediaStatusChanged(QMediaPlayer::MediaStatus status)
@@ -113,6 +139,11 @@ void VideoPlayerImpl::onMediaStatusChanged(QMediaPlayer::MediaStatus status)
     break;
   case QMediaPlayer::InvalidMedia:
     qWarning() << "Invalid media:" << _player->errorString();
+    if (_firstFrame)
+    {
+      auto ready = std::move(_firstFrame);
+      ready(false);
+    }
     break;
   default:
     break;
@@ -157,7 +188,7 @@ void VideoPlayerImpl::update()
 {
   if (_eos) {
     _eos = false;
-    if (_playInLoop)
+    if (_playInLoop && !_podFrameReady && !_firstFrame)
       resetMovie();
   }
 }

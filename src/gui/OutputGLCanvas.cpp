@@ -37,13 +37,14 @@ OutputGLCanvas::OutputGLCanvas(MainWindow* mainWindow, QWidget* parent, QOpenGLW
   // Disable scrollbars.
   setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  setAlignment(Qt::AlignLeft | Qt::AlignTop);
 
   setSceneRectToViewportGeometry();
 }
 
 void OutputGLCanvas::setSceneRectToViewportGeometry()
 {
-  setSceneRect(viewport()->geometry());
+  setSceneRect(viewport()->rect());
 }
 
 void OutputGLCanvas::setSyphonOutputEnabled(bool on)
@@ -291,10 +292,9 @@ void OutputGLCanvas::_drawResolutionText(QPainter *painter, const QRect &rect, i
   }
 }
 
-void OutputGLCanvas::resizeGL(int width, int height)
+void OutputGLCanvas::resizeEvent(QResizeEvent* event)
 {
-  Q_UNUSED(width);
-  Q_UNUSED(height);
+  MapperGLCanvas::resizeEvent(event);
   setSceneRectToViewportGeometry();
 }
 

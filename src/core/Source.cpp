@@ -126,11 +126,7 @@ void Image::build()
   QImageReader reader(_uri);
   _images.clear();
   for (int i = 0; i < reader.imageCount(); i++) {
-    QImage raw = reader.read().convertToFormat(QImage::Format_RGBA8888);
-    QT_WARNING_PUSH
-    QT_WARNING_DISABLE_DEPRECATED
-    _images.push_back(raw.mirrored(true, false).transformed(QTransform().rotate(180)));
-    QT_WARNING_POP
+    _images.push_back(reader.read().convertToFormat(QImage::Format_RGBA8888));
   }
 
   rewind();
@@ -138,6 +134,8 @@ void Image::build()
 
 void Image::update()
 {
+  Texture::update();
+
   if (isAnimation() && isPlaying())
   {
     // Compute the interval of time since last call to update().
@@ -247,7 +245,8 @@ Video::~Video()
 
 void Video::build()
 {
-  this->_impl->build();
+  if (!_readingPodDeferred)
+    _impl->build();
 }
 
 int Video::getWidth() const
@@ -269,7 +268,8 @@ void Video::update() {
 
 void Video::rewind()
 {
-  _impl->resetMovie();
+  if (!_readingPodDeferred || _impl->hasBits())
+    _impl->resetMovie();
 }
 
 void Video::releaseResources()
@@ -279,13 +279,28 @@ void Video::releaseResources()
   // camera be re-opened) without invalidating the source. See reacquireResources().
   if (_impl)
     _impl->unloadMovie();
+  if (_readingPodDeferred && textureId != 0)
+  {
+    orphanTexture(textureId);
+    textureId = 0;
+  }
 }
 
 void Video::reacquireResources()
 {
   // Re-open using the stored URI/device id (set by loadMovie()).
-  if (_impl)
-    _impl->build();
+  build();
+}
+
+void Video::prepareReadingPodFrame(std::function<void(bool)> ready)
+{
+  auto *player = dynamic_cast<VideoPlayerImpl*>(_impl);
+  if (!_readingPodDeferred || !player || !QFileInfo(_uri).isFile())
+  {
+    ready(false);
+    return;
+  }
+  player->prepareFirstFrame(_uri, std::move(ready));
 }
 
 void Video::lockMutex() {
@@ -348,6 +363,15 @@ bool Video::setUri(const QString &uri)
   // the same media source (uri)
   if (sameMediaSourceOSC || uri != _uri)
   {
+    if (_readingPodDeferred)
+    {
+      releaseResources();
+      _uri = uri;
+      _setFallbackIcon();
+      _emitPropertyChanged("uri");
+      return true;
+    }
+
     // Try to load movie.
     if (!_impl->loadMovie(uri))
     {

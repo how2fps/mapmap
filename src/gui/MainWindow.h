@@ -337,6 +337,9 @@ private:
 
 public:
   bool loadFile(const QString &fileName);
+  bool isReadingPodProject() const;
+  void loadReadingPodStory(const QString &revision = QString());
+  void applyReadingPodLayout(const QString &ticket);
   bool saveFile(const QString &fileName);
   void setCurrentFile(const QString &fileName);
   void setCurrentVideo(const QString &filename);

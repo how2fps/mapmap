@@ -20,6 +20,11 @@
  */
 
 #include "MainWindow.h"
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QSaveFile>
+#include <cmath>
 #include "PreferenceDialog.h"
 #include "AboutDialog.h"
 #include "WelcomeDialog.h"
@@ -92,6 +97,9 @@ MainWindow::MainWindow()
   readSettings();
 
   // Start osc.
+  osc_timer = new QTimer(this);
+  connect(osc_timer, &QTimer::timeout, this, &MainWindow::pollOscInterface);
+  osc_timer->start(10);
   startOscReceiver();
 
 #ifdef HAVE_MCP
@@ -126,6 +134,7 @@ MainWindow::MainWindow()
 
 MainWindow::~MainWindow()
 {
+  delete outputWindow;
   delete mappingManager;
   //  delete _facade;
   delete osc_timer;
@@ -1782,6 +1791,11 @@ void MainWindow::createLayout()
   _preferenceDialog = new PreferenceDialog(this);
 
   outputWindow = new OutputGLWindow(this, destinationCanvas);
+#ifdef Q_OS_WIN
+  // Windows hides owned windows when their owner is minimized. Keep projector
+  // output independent, with its lifetime managed by MainWindow's destructor.
+  outputWindow->setParent(nullptr, Qt::Window | Qt::FramelessWindowHint);
+#endif
   outputWindow->installEventFilter(destinationCanvas);
 
   // Source scene changed -> change destination.
@@ -2779,7 +2793,6 @@ void MainWindow::readSettings()
   outputWindow->restoreGeometry(settings.value("outputWindow").toByteArray());
 
   // new in 0.1.2:
-  outputFullScreenAction->setChecked(settings.value("displayOutputWindow", MM::DISPLAY_OUTPUT_WINDOW).toBool());
   displayTestSignalAction->setChecked(settings.value("displayTestSignal", MM::DISPLAY_TEST_SIGNAL).toBool());
   displayControlsAction->setChecked(settings.value("displayControls", MM::DISPLAY_CONTROLS).toBool());
   outputWindow->setCanvasDisplayCrosshair(settings.value("displayControls", MM::DISPLAY_CONTROLS).toBool());
@@ -2878,15 +2891,177 @@ bool MainWindow::loadFile(const QString &fileName)
                          tr("Parse error in file %1:\n\n%2")
                          .arg(fileName)
                          .arg(reader.errorString()));
+    return false;
   }
   else
   {
-    settings.setValue("defaultProjectDir", currentDir.absoluteFilePath(fileName));
+    const QString storyPath = qEnvironmentVariable("READING_POD_MAPMAP_PROJECT");
+    if (storyPath.isEmpty() || QFileInfo(fileName).absoluteFilePath() != QFileInfo(storyPath).absoluteFilePath())
+      settings.setValue("defaultProjectDir", currentDir.absoluteFilePath(fileName));
     statusBar()->showMessage(tr("File loaded"), 2000);
     setCurrentFile(fileName);
   }
 
   return true;
+}
+
+bool MainWindow::isReadingPodProject() const
+{
+  const QString path = qEnvironmentVariable("READING_POD_MAPMAP_PROJECT");
+  return !path.isEmpty() && QFileInfo(curFile).absoluteFilePath() == QFileInfo(path).absoluteFilePath();
+}
+
+void MainWindow::loadReadingPodStory(const QString &revision)
+{
+  const QString path = qEnvironmentVariable("READING_POD_MAPMAP_PROJECT");
+  if (path.isEmpty())
+    return;
+
+  QFile input(path);
+  QJsonObject project;
+  if (input.open(QIODevice::ReadOnly))
+    project = QJsonDocument::fromJson(input.readAll()).object();
+  input.close();
+  const QString preparedRevision = project.value("readingPodRevision").toString();
+  if (preparedRevision.isEmpty() || (!revision.isEmpty() && preparedRevision != revision))
+    return;
+
+  QString error;
+  if ((!curFile.isEmpty() && !isReadingPodProject()) || isWindowModified())
+    error = tr("Save your edits and reopen MapMap with the Reading Pod launcher.");
+  else if (property("_readingPodRevision").toString() != preparedRevision)
+  {
+    if (loadFile(path))
+      setProperty("_readingPodRevision", preparedRevision);
+    else
+      error = tr("MapMap could not open the selected story.");
+  }
+
+  const QJsonObject status {{ "revision", preparedRevision },
+                            { "pid", QCoreApplication::applicationPid() },
+                            { "layoutUpdates", true },
+                            { "layoutPreview", true },
+                            { "error", error }};
+  QSaveFile reply(path + ".status");
+  if (reply.open(QIODevice::WriteOnly))
+  {
+    reply.write(QJsonDocument(status).toJson(QJsonDocument::Compact));
+    reply.commit();
+  }
+}
+
+void MainWindow::applyReadingPodLayout(const QString &ticket)
+{
+  const QString path = qEnvironmentVariable("READING_POD_MAPMAP_PROJECT");
+  if (path.isEmpty() || ticket.size() != 32)
+    return;
+
+  QJsonArray applied;
+  const auto apply = [&]() -> QString {
+    if (!isReadingPodProject() || isWindowModified())
+      return tr("Save your MapMap edits before applying the panel layout.");
+    QFile requestFile(path + ".layout-request");
+    if (!requestFile.open(QIODevice::ReadOnly) || requestFile.size() > 1024 * 1024)
+      return tr("MapMap could not read the layout request.");
+    const QJsonObject request = QJsonDocument::fromJson(requestFile.readAll()).object();
+    if (request.value("ticket").toString() != ticket)
+      return tr("The layout request changed. Try saving again.");
+    QFile projectFile(path);
+    if (!projectFile.open(QIODevice::ReadOnly))
+      return tr("MapMap could not read the selected-story project.");
+    const QByteArray original = projectFile.readAll();
+    QJsonObject project = QJsonDocument::fromJson(original).object();
+    projectFile.close();
+    const QString revision = property("_readingPodRevision").toString();
+    if (revision.isEmpty() || request.value("storyRevision").toString() != revision
+        || project.value("readingPodRevision").toString() != revision)
+      return tr("The selected story changed. Reselect the story and try saving again.");
+
+    QMap<uid, QVector<QPointF>> changes;
+    for (const QJsonValue &item : request.value("layers").toArray())
+    {
+      const QJsonObject update = item.toObject();
+      const int id = update.value("id").toInt(-1);
+      const Layer::ptr layer = mappingManager->getLayerById(id);
+      const QJsonArray points = update.value("vertices").toArray();
+      if (id <= 0 || changes.contains(id) || layer.isNull() || layer->getShape().isNull()
+          || points.size() != layer->getShape()->nVertices())
+        return tr("A wall mesh changed. Reselect the story and try saving again.");
+      QVector<QPointF> corners;
+      for (const QJsonValue &point : points)
+      {
+        const QJsonArray pair = point.toArray();
+        if (pair.size() != 2 || !pair[0].isDouble() || !pair[1].isDouble())
+          return tr("The layout contains an invalid corner.");
+        const double x = pair[0].toDouble(), y = pair[1].toDouble();
+        if (!std::isfinite(x) || !std::isfinite(y) || std::abs(x) > 32768 || std::abs(y) > 32768)
+          return tr("The layout contains an invalid corner.");
+        corners.append(QPointF(x, y));
+      }
+      changes.insert(id, corners);
+    }
+    if (changes.isEmpty())
+      return tr("The layout request contains no walls.");
+
+    QSet<uid> found;
+    QJsonArray layers = project.value("layers").toArray();
+    for (int i = 0; i < layers.size(); ++i)
+    {
+      QJsonObject layer = layers[i].toObject();
+      const int id = layer.value("id").toInt(-1);
+      if (!changes.contains(id))
+        continue;
+      QJsonArray points;
+      for (const QPointF &corner : changes[id])
+        points.append(QJsonArray{corner.x(), corner.y()});
+      QJsonObject destination = layer.value("destination").toObject();
+      destination.insert("vertices", points);
+      layer.insert("destination", destination);
+      layers[i] = layer;
+      found.insert(id);
+    }
+    if (found.size() != changes.size())
+      return tr("The selected-story file has different walls. Reselect the story.");
+    project.insert("layers", layers);
+    project.insert("readingPodLayoutRevision", request.value("masterRevision"));
+    QFile unchanged(path);
+    if (!unchanged.open(QIODevice::ReadOnly) || unchanged.readAll() != original)
+      return tr("The selected-story file changed while saving. Try again.");
+    unchanged.close();
+    const QByteArray payload = QJsonDocument(project).toJson(QJsonDocument::Indented);
+    if (request.value("persist").toBool(true))
+    {
+      QSaveFile saved(path);
+      if (!saved.open(QIODevice::WriteOnly)
+          || saved.write(payload) != payload.size() || !saved.commit())
+        return tr("MapMap could not save the selected-story layout.");
+    }
+
+    for (auto change = changes.cbegin(); change != changes.cend(); ++change)
+    {
+      const MShape::ptr shape = mappingManager->getLayerById(change.key())->getShape();
+      // Complete layouts are already validated. Per-corner constraints would
+      // compare new corners with old neighbours and can distort a large fit.
+      shape->setVertices(change.value());
+      QJsonArray actual;
+      for (int i = 0; i < shape->nVertices(); ++i)
+        actual.append(QJsonArray{shape->getVertex(i).x(), shape->getVertex(i).y()});
+      applied.append(QJsonObject{{"id", int(change.key())}, {"vertices", actual}});
+    }
+    setWindowModified(false);
+    destinationCanvas->scene()->update();
+    outputWindow->getCanvas()->update();
+    return QString();
+  };
+  const QString error = apply();
+  QSaveFile reply(path + ".layout-status");
+  if (reply.open(QIODevice::WriteOnly))
+  {
+    reply.write(QJsonDocument(QJsonObject{{"ticket", ticket},
+                {"pid", QCoreApplication::applicationPid()}, {"error", error},
+                {"layers", applied}}).toJson(QJsonDocument::Compact));
+    reply.commit();
+  }
 }
 
 bool MainWindow::saveFile(const QString &fileName)
@@ -2935,8 +3110,9 @@ void MainWindow::setCurrentFile(const QString &fileName)
 
   QString shownName = tr("Untitled");
   if (!curFile.isEmpty())
-  {
     shownName = strippedName(curFile);
+  if (!curFile.isEmpty() && !isReadingPodProject())
+  {
     recentFiles = settings.value("recentFiles").toStringList();
     recentFiles.removeAll(curFile);
     recentFiles.prepend(curFile);
@@ -3971,14 +4147,13 @@ void MainWindow::startOscReceiver()
 #else
   QMessageLogger(__FILE__, __LINE__, 0).debug() << "OSC port: " << oscListeningPort;
 #endif
+  // Release the old socket before binding, including when the port is unchanged.
+  osc_interface.reset();
   osc_interface.reset(new OscInterface(oscListeningPort, oscAcceptNetwork));
   if (oscListeningPort != 0)
   {
     osc_interface->start();
   }
-  osc_timer = new QTimer(this); // FIXME: memleak?
-  connect(osc_timer, &QTimer::timeout, this, &MainWindow::pollOscInterface);
-  osc_timer->start();
 }
 
 bool MainWindow::setOscPort(int port)
